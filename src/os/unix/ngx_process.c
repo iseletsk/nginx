@@ -35,6 +35,8 @@ ngx_socket_t     ngx_channel;
 ngx_int_t        ngx_last_process;
 ngx_process_t    ngx_processes[NGX_MAX_PROCESSES];
 
+extern sig_atomic_t  ngx_reload_server;
+
 
 ngx_signal_t  signals[] = {
     { ngx_signal_value(NGX_RECONFIGURE_SIGNAL),
@@ -45,6 +47,11 @@ ngx_signal_t  signals[] = {
     { ngx_signal_value(NGX_REOPEN_SIGNAL),
       "SIG" ngx_value(NGX_REOPEN_SIGNAL),
       "reopen",
+      ngx_signal_handler },
+
+    { ngx_signal_value(NGX_RELOAD_SERVER_SIGNAL),
+      "SIG" ngx_value(NGX_RELOAD_SERVER_SIGNAL),
+      "reload_server",
       ngx_signal_handler },
 
     { ngx_signal_value(NGX_NOACCEPT_SIGNAL),
@@ -74,8 +81,6 @@ ngx_signal_t  signals[] = {
     { SIGIO, "SIGIO", "", ngx_signal_handler },
 
     { SIGCHLD, "SIGCHLD", "", ngx_signal_handler },
-
-    { SIGSYS, "SIGSYS, SIG_IGN", "", NULL },
 
     { SIGPIPE, "SIGPIPE, SIG_IGN", "", NULL },
 
@@ -371,6 +376,11 @@ ngx_signal_handler(int signo, siginfo_t *siginfo, void *ucontext)
             action = ", reopening logs";
             break;
 
+        case ngx_signal_value(NGX_RELOAD_SERVER_SIGNAL):
+            ngx_reload_server = 1;
+            action = ", reloading server";
+            break;
+
         case ngx_signal_value(NGX_CHANGEBIN_SIGNAL):
             if (ngx_getppid() == ngx_parent || ngx_new_binary > 0) {
 
@@ -429,6 +439,11 @@ ngx_signal_handler(int signo, siginfo_t *siginfo, void *ucontext)
         case ngx_signal_value(NGX_REOPEN_SIGNAL):
             ngx_reopen = 1;
             action = ", reopening logs";
+            break;
+
+        case ngx_signal_value(NGX_RELOAD_SERVER_SIGNAL):
+            ngx_reload_server = 1;
+            action = ", reloading server";
             break;
 
         case ngx_signal_value(NGX_RECONFIGURE_SIGNAL):

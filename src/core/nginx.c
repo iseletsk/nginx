@@ -188,6 +188,7 @@ static u_char      *ngx_error_log;
 static u_char      *ngx_conf_file;
 static u_char      *ngx_conf_params;
 static char        *ngx_signal;
+char               *ngx_reload_server_target;
 
 
 static char **ngx_os_environ;
@@ -917,10 +918,22 @@ ngx_get_options(int argc, char *const *argv)
                     return NGX_ERROR;
                 }
 
+                if (ngx_strncmp(ngx_signal, "reload_server=", 14) == 0) {
+                    if (ngx_signal[14] == '\0') {
+                        ngx_log_stderr(0,
+                                       "option \"-s reload_server\" requires file name");
+                        return NGX_ERROR;
+                    }
+
+                    ngx_reload_server_target = ngx_signal + 14;
+                    ngx_signal = (char *) "reload_server";
+                }
+
                 if (ngx_strcmp(ngx_signal, "stop") == 0
                     || ngx_strcmp(ngx_signal, "quit") == 0
                     || ngx_strcmp(ngx_signal, "reopen") == 0
-                    || ngx_strcmp(ngx_signal, "reload") == 0)
+                    || ngx_strcmp(ngx_signal, "reload") == 0
+                    || ngx_strcmp(ngx_signal, "reload_server") == 0)
                 {
                     ngx_process = NGX_PROCESS_SIGNALLER;
                     goto next;

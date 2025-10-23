@@ -8,9 +8,15 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ctype.h>
 
 
 static char *ngx_http_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+ngx_int_t ngx_http_reload_server_block(ngx_cycle_t *cycle);
+static ngx_int_t ngx_http_read_reload_server_request(ngx_cycle_t *cycle,
+    ngx_pool_t *pool, ngx_str_t *path);
+static ngx_int_t ngx_http_parse_reload_server_file(ngx_cycle_t *cycle,
+    ngx_pool_t *pool, ngx_str_t *path);
 static ngx_int_t ngx_http_init_phases(ngx_conf_t *cf,
     ngx_http_core_main_conf_t *cmcf);
 static ngx_int_t ngx_http_init_headers_in_hash(ngx_conf_t *cf,
@@ -336,6 +342,8 @@ ngx_http_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     if (ngx_http_optimize_servers(cf, cmcf, cmcf->ports) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
+
+    ngx_reload_server_handler = ngx_http_reload_server_block;
 
     return NGX_CONF_OK;
 
@@ -2197,3 +2205,339 @@ ngx_http_set_default_types(ngx_conf_t *cf, ngx_array_t **types,
 
     return NGX_OK;
 }
+
+
+ngx_int_t
+ngx_http_reload_server_block(ngx_cycle_t *cycle)
+{
+    ngx_int_t   rc;
+    ngx_pool_t *pool;
+    ngx_str_t   path;
+
+    if (cycle == NULL) {
+        return NGX_ERROR;
+    }
+
+    pool = ngx_create_pool(4096, cycle->log);
+    if (pool == NULL) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "reload_server: failed to allocate pool");
+        return NGX_ERROR;
+    }
+
+    ngx_str_null(&path);
+
+    rc = ngx_http_read_reload_server_request(cycle, pool, &path);
+    if (rc != NGX_OK) {
+        ngx_destroy_pool(pool);
+        return rc;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "reload_server: processing request for \"%V\"", &path);
+
+    rc = ngx_http_parse_reload_server_file(cycle, pool, &path);
+    if (rc != NGX_OK) {
+        ngx_destroy_pool(pool);
+        return rc;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "reload_server: sending reconfigure to pid %P", ngx_pid);
+
+    if (kill(ngx_pid, ngx_signal_value(NGX_RECONFIGURE_SIGNAL)) == -1) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      "reload_server: kill(%P, %d) failed", ngx_pid,
+                      ngx_signal_value(NGX_RECONFIGURE_SIGNAL));
+        ngx_destroy_pool(pool);
+        return NGX_ERROR;
+    }
+
+    ngx_reconfigure = 1;
+
+    ngx_destroy_pool(pool);
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_read_reload_server_request(ngx_cycle_t *cycle, ngx_pool_t *pool,
+    ngx_str_t *path)
+{
+    ssize_t    n;
+    ngx_fd_t   fd;
+    ngx_str_t  control;
+    u_char     name[NGX_MAX_PATH];
+    u_char     buf[NGX_MAX_PATH];
+    u_char    *p;
+
+    p = ngx_copy(name, cycle->prefix.data, cycle->prefix.len);
+
+    if (p > name && !ngx_path_separator(*(p - 1))) {
+        if (p == name + NGX_MAX_PATH) {
+            ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                          "reload_server: control path is too long");
+            return NGX_ERROR;
+        }
+
+        *p++ = '/';
+    }
+
+    p = ngx_slprintf(p, name + NGX_MAX_PATH, "logs/server-reload");
+
+    if (p >= name + NGX_MAX_PATH) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "reload_server: control path is too long");
+        return NGX_ERROR;
+    }
+
+    *p = '\0';
+
+    control.data = name;
+    control.len = ngx_strlen(name);
+
+    fd = ngx_open_file(control.data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      ngx_open_file_n " \"%s\" failed", control.data);
+        return NGX_ERROR;
+    }
+
+    n = ngx_read_fd(fd, buf, NGX_MAX_PATH - 1);
+    if (n == -1) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      ngx_read_fd_n " \"%s\" failed", control.data);
+        (void) ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
+                      ngx_close_file_n " \"%s\" failed", control.data);
+    }
+
+    while (n > 0 && (buf[n - 1] == CR || buf[n - 1] == LF)) {
+        n--;
+    }
+
+    buf[n] = '\0';
+
+    path->len = n;
+    path->data = ngx_pnalloc(pool, n + 1);
+    if (path->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(path->data, buf, n + 1);
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_parse_reload_server_file(ngx_cycle_t *cycle, ngx_pool_t *pool,
+    ngx_str_t *path)
+{
+    char                       *rv;
+    ngx_conf_t                  conf;
+    ngx_module_t              **modules;
+    ngx_http_module_t          *module;
+    ngx_http_conf_ctx_t        *ctx;
+    ngx_http_core_main_conf_t  *cmcf;
+    ngx_http_core_srv_conf_t  **cscfp;
+    ngx_uint_t                  m, mi, s;
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "reload_server: entering parse for \"%V\"", path);
+
+    ngx_memzero(&conf, sizeof(ngx_conf_t));
+
+    conf.cycle = cycle;
+    conf.pool = pool;
+    conf.log = cycle->log;
+
+    conf.args = ngx_array_create(pool, 4, sizeof(ngx_str_t));
+    if (conf.args == NULL) {
+        return NGX_ERROR;
+    }
+
+    conf.conf_file = ngx_pcalloc(pool, sizeof(ngx_conf_file_t));
+    if (conf.conf_file == NULL) {
+        return NGX_ERROR;
+    }
+
+    conf.conf_file->file.fd = NGX_INVALID_FILE;
+    conf.conf_file->file.name = *path;
+    conf.conf_file->file.log = cycle->log;
+    conf.conf_file->file.offset = 0;
+    conf.conf_file->line = 0;
+
+    ngx_http_max_module = ngx_count_modules(cycle, NGX_HTTP_MODULE);
+
+    conf.temp_pool = ngx_create_pool(1024, cycle->log);
+    if (conf.temp_pool == NULL) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "reload_server: failed to allocate temporary pool");
+        return NGX_ERROR;
+    }
+
+    ctx = ngx_pcalloc(pool, sizeof(ngx_http_conf_ctx_t));
+    if (ctx == NULL) {
+        goto failed;
+    }
+
+    ctx->main_conf = ngx_pcalloc(pool, sizeof(void *) * ngx_http_max_module);
+    if (ctx->main_conf == NULL) {
+        goto failed;
+    }
+
+    ctx->srv_conf = ngx_pcalloc(pool, sizeof(void *) * ngx_http_max_module);
+    if (ctx->srv_conf == NULL) {
+        goto failed;
+    }
+
+    ctx->loc_conf = ngx_pcalloc(pool, sizeof(void *) * ngx_http_max_module);
+    if (ctx->loc_conf == NULL) {
+        goto failed;
+    }
+
+    conf.ctx = ctx;
+
+    modules = cycle->modules;
+
+    for (m = 0; modules[m]; m++) {
+        if (modules[m]->type != NGX_HTTP_MODULE) {
+            continue;
+        }
+
+        module = modules[m]->ctx;
+        mi = modules[m]->ctx_index;
+
+        if (module->create_main_conf) {
+            ctx->main_conf[mi] = module->create_main_conf(&conf);
+            if (ctx->main_conf[mi] == NULL) {
+                ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                              "reload_server: create_main_conf failed for %V",
+                              &modules[m]->name);
+                goto failed;
+            }
+        }
+
+        if (module->create_srv_conf) {
+            ctx->srv_conf[mi] = module->create_srv_conf(&conf);
+            if (ctx->srv_conf[mi] == NULL) {
+                ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                              "reload_server: create_srv_conf failed for %V",
+                              &modules[m]->name);
+                goto failed;
+            }
+        }
+
+        if (module->create_loc_conf) {
+            ctx->loc_conf[mi] = module->create_loc_conf(&conf);
+            if (ctx->loc_conf[mi] == NULL) {
+                ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                              "reload_server: create_loc_conf failed for %V",
+                              &modules[m]->name);
+                goto failed;
+            }
+        }
+    }
+
+    for (m = 0; modules[m]; m++) {
+        if (modules[m]->type != NGX_HTTP_MODULE) {
+            continue;
+        }
+
+        module = modules[m]->ctx;
+
+        if (module->preconfiguration) {
+            if (module->preconfiguration(&conf) != NGX_OK) {
+                goto failed;
+            }
+        }
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "reload_server: preconfiguration complete for \"%V\"", path);
+
+    conf.module_type = NGX_HTTP_MODULE;
+    conf.cmd_type = NGX_HTTP_MAIN_CONF;
+
+    rv = ngx_conf_parse(&conf, path);
+
+    if (rv != NGX_CONF_OK) {
+        if (rv != NGX_CONF_ERROR) {
+            ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                          "reload_server: parse error: %s", rv);
+        }
+        goto failed;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "reload_server: parse completed for \"%V\"", path);
+
+    cmcf = ctx->main_conf[ngx_http_core_module.ctx_index];
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "reload_server: parsed %ui server blocks",
+                  cmcf->servers.nelts);
+
+    if (cmcf->servers.nelts != 1) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "reload_server: file \"%V\" must define exactly one "
+                      "server block", path);
+        goto failed;
+    }
+
+    for (m = 0; modules[m]; m++) {
+        if (modules[m]->type != NGX_HTTP_MODULE) {
+            continue;
+        }
+
+        module = modules[m]->ctx;
+        mi = modules[m]->ctx_index;
+
+        if (module->init_main_conf) {
+            rv = module->init_main_conf(&conf, ctx->main_conf[mi]);
+            if (rv != NGX_CONF_OK) {
+                goto failed;
+            }
+        }
+
+        rv = ngx_http_merge_servers(&conf, cmcf, module, mi);
+        if (rv != NGX_CONF_OK) {
+            goto failed;
+        }
+    }
+
+    cscfp = cmcf->servers.elts;
+
+    for (s = 0; s < cmcf->servers.nelts; s++) {
+        ngx_http_core_loc_conf_t  *clcf;
+
+        clcf = cscfp[s]->ctx->loc_conf[ngx_http_core_module.ctx_index];
+
+        if (ngx_http_init_locations(&conf, cscfp[s], clcf) != NGX_OK) {
+            goto failed;
+        }
+
+        if (ngx_http_init_static_location_trees(&conf, clcf) != NGX_OK) {
+            goto failed;
+        }
+    }
+
+    ngx_destroy_pool(conf.temp_pool);
+
+    return NGX_OK;
+
+failed:
+
+    if (conf.temp_pool) {
+        ngx_destroy_pool(conf.temp_pool);
+    }
+
+    return NGX_ERROR;
+}
+

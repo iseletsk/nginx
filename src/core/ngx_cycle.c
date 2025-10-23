@@ -11,9 +11,15 @@
 
 
 static void ngx_destroy_cycle_pools(ngx_conf_t *conf);
+static ngx_int_t ngx_write_reload_server_request(ngx_cycle_t *cycle,
+    ngx_str_t *path);
 static ngx_int_t ngx_init_zone_pool(ngx_cycle_t *cycle,
     ngx_shm_zone_t *shm_zone);
 static ngx_int_t ngx_test_lockfile(u_char *file, ngx_log_t *log);
+extern char *ngx_reload_server_target;
+
+ngx_reload_server_pt   ngx_reload_server_handler;
+
 static void ngx_clean_old_cycles(ngx_event_t *ev);
 static void ngx_shutdown_timer_handler(ngx_event_t *ev);
 
@@ -1134,8 +1140,106 @@ ngx_signal_process(ngx_cycle_t *cycle, char *sig)
         return 1;
     }
 
+    if (ngx_strcmp(sig, "reload_server") == 0) {
+        ngx_str_t  path;
+
+        if (ngx_reload_server_handler == NULL) {
+            ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                          "reload_server is not available");
+            return 1;
+        }
+
+        if (ngx_reload_server_target == NULL) {
+            ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                          "reload_server target is not specified");
+            return 1;
+        }
+
+        path.len = ngx_strlen(ngx_reload_server_target);
+        path.data = ngx_pnalloc(cycle->pool, path.len + 1);
+        if (path.data == NULL) {
+            return 1;
+        }
+
+        ngx_memcpy(path.data, ngx_reload_server_target, path.len);
+        path.data[path.len] = '\0';
+
+        if (ngx_conf_full_name(cycle, &path, 0) != NGX_OK) {
+            return 1;
+        }
+
+        if (ngx_write_reload_server_request(cycle, &path) != NGX_OK) {
+            return 1;
+        }
+
+        ngx_reload_server_target = NULL;
+
+        return ngx_os_signal_process(cycle, sig, pid);
+    }
+
     return ngx_os_signal_process(cycle, sig, pid);
 
+}
+
+
+static ngx_int_t
+ngx_write_reload_server_request(ngx_cycle_t *cycle, ngx_str_t *path)
+{
+    ngx_fd_t    fd;
+    ngx_str_t   control;
+    u_char      name[NGX_MAX_PATH];
+    u_char     *p;
+
+    p = ngx_copy(name, cycle->prefix.data, cycle->prefix.len);
+
+    if (p > name && !ngx_path_separator(*(p - 1))) {
+        if (p == name + NGX_MAX_PATH) {
+            ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                          "server reload request path is too long");
+            return NGX_ERROR;
+        }
+
+        *p++ = '/';
+    }
+
+    p = ngx_slprintf(p, name + NGX_MAX_PATH, "logs/server-reload");
+
+    if (p >= name + NGX_MAX_PATH) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                      "server reload request path is too long");
+        return NGX_ERROR;
+    }
+
+    control.len = p - name;
+    control.data = name;
+
+    *p = '\0';
+
+    fd = ngx_open_file(control.data, NGX_FILE_WRONLY,
+                       NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
+
+    if (fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      ngx_open_file_n " \"%s\" failed", control.data);
+        return NGX_ERROR;
+    }
+
+    if (ngx_write_fd(fd, path->data, path->len) == NGX_FILE_ERROR
+        || ngx_write_fd(fd, NGX_LINEFEED, NGX_LINEFEED_SIZE) == NGX_FILE_ERROR)
+    {
+        ngx_log_error(NGX_LOG_ERR, cycle->log, ngx_errno,
+                      ngx_write_fd_n " \"%s\" failed", control.data);
+        (void) ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
+                      ngx_close_file_n " \"%s\" failed", control.data);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
 }
 
 

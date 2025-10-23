@@ -42,6 +42,7 @@ sig_atomic_t  ngx_debug_quit;
 ngx_uint_t    ngx_exiting;
 sig_atomic_t  ngx_reconfigure;
 sig_atomic_t  ngx_reopen;
+sig_atomic_t  ngx_reload_server;
 
 sig_atomic_t  ngx_change_binary;
 ngx_pid_t     ngx_new_binary;
@@ -95,6 +96,7 @@ ngx_master_process_cycle(ngx_cycle_t *cycle)
     sigaddset(&set, ngx_signal_value(NGX_TERMINATE_SIGNAL));
     sigaddset(&set, ngx_signal_value(NGX_SHUTDOWN_SIGNAL));
     sigaddset(&set, ngx_signal_value(NGX_CHANGEBIN_SIGNAL));
+    sigaddset(&set, ngx_signal_value(NGX_RELOAD_SERVER_SIGNAL));
 
     if (sigprocmask(SIG_BLOCK, &set, NULL) == -1) {
         ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
@@ -259,6 +261,24 @@ ngx_master_process_cycle(ngx_cycle_t *cycle)
                                         ngx_signal_value(NGX_REOPEN_SIGNAL));
         }
 
+        if (ngx_reload_server) {
+            ngx_reload_server = 0;
+
+            if (ngx_reload_server_handler == NULL) {
+                ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                              "reload_server signal ignored");
+                continue;
+            }
+
+            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                          "validating server block before reload");
+
+            if (ngx_reload_server_handler(cycle) != NGX_OK) {
+                ngx_log_error(NGX_LOG_ERR, cycle->log, 0,
+                              "single server reload failed");
+            }
+        }
+
         if (ngx_change_binary) {
             ngx_change_binary = 0;
             ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "changing binary");
@@ -327,6 +347,19 @@ ngx_single_process_cycle(ngx_cycle_t *cycle)
             ngx_reopen = 0;
             ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "reopening logs");
             ngx_reopen_files(cycle, (ngx_uid_t) -1);
+        }
+
+        if (ngx_reload_server) {
+            ngx_reload_server = 0;
+
+            if (ngx_reload_server_handler == NULL) {
+                ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                              "reload_server signal ignored");
+                continue;
+            }
+
+            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                          "reload_server acknowledged by worker");
         }
     }
 }
@@ -523,7 +556,9 @@ ngx_signal_worker_processes(ngx_cycle_t *cycle, int signo)
             continue;
         }
 
-        if (signo != ngx_signal_value(NGX_REOPEN_SIGNAL)) {
+        if (signo != ngx_signal_value(NGX_REOPEN_SIGNAL)
+            && signo != ngx_signal_value(NGX_RELOAD_SERVER_SIGNAL))
+        {
             ngx_processes[i].exiting = 1;
         }
     }

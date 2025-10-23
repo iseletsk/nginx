@@ -190,6 +190,9 @@ extern ngx_module_t  ngx_http_module;
 extern ngx_str_t  ngx_http_html_default_types[];
 
 
+ngx_int_t ngx_http_reload_server_block(ngx_cycle_t *cycle);
+
+
 extern ngx_http_output_header_filter_pt  ngx_http_top_header_filter;
 extern ngx_http_output_header_filter_pt  ngx_http_top_early_hints_filter;
 extern ngx_http_output_body_filter_pt    ngx_http_top_body_filter;
