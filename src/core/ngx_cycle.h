@@ -24,6 +24,10 @@
 
 typedef struct ngx_shm_zone_s  ngx_shm_zone_t;
 
+typedef ngx_int_t (*ngx_reload_server_pt)(ngx_cycle_t *cycle);
+
+extern ngx_reload_server_pt  ngx_reload_server_handler;
+
 typedef ngx_int_t (*ngx_shm_zone_init_pt) (ngx_shm_zone_t *zone, void *data);
 
 struct ngx_shm_zone_s {
