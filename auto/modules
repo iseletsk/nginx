@@ -710,6 +710,29 @@ if [ $HTTP = YES ]; then
         . auto/module
     fi
 
+    if [ $HTTP_AP_REWRITE = YES -o $HTTP_AP_REWRITE = DYNAMIC ]; then
+        if [ $USE_PCRE = DISABLED ]; then
+            cat << END
+$0: error: the HTTP Apache rewrite compatibility module requires the PCRE library.
+You can either disable the module by using --without-http_ap_rewrite_module
+or install the PCRE library into the system, or build the PCRE library
+statically from the source with nginx by using --with-pcre=PATH.
+END
+            exit 1
+        fi
+
+        USE_PCRE=YES
+
+        ngx_module_name=ngx_http_ap_rewrite_module
+        ngx_module_incs=
+        ngx_module_deps=
+        ngx_module_srcs=src/http/modules/ngx_http_ap_rewrite_module.c
+        ngx_module_libs=
+        ngx_module_link=$HTTP_AP_REWRITE
+
+        . auto/module
+    fi
+
     if [ $HTTP_SSL = YES ]; then
         USE_OPENSSL=YES
         have=NGX_HTTP_SSL . auto/have
